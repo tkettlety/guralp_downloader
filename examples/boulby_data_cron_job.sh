@@ -22,7 +22,7 @@ STATIONS=("BOU5")
 
 # Corresponding data directories (must match STATIONS order)
 STATION_DIRS=(
-  "/Users/tom/work/boulby_data/remote_seis/BOU5"
+  "/Users/tom/work/boulby_data/remote_seis"
 )
 # STATION_DIRS=(
 #   "/Users/tom/work/boulby_data/remote_seis/MRY2"
@@ -46,6 +46,10 @@ done
 # python "$PYTHON_SCRIPT" "$CONFIG_FILE" "BOU5" \
 #   --start 2026-01-03T01:00:00Z \
 #   --end 2026-01-03T03:30:00Z
+#
+# SDS output examples:
+#   /archive/2026/OX/BOU5/CHZ.D/OX.BOU5.1L.CHZ.D.2026.003
+#   /archive/2026/OX/BOU5/CHZ.D/OX.BOU5.1L.CHZ.D.START_20260103T010000_END_20260103T033000
 
 # Wait for all background jobs to finish
 wait
@@ -63,5 +67,4 @@ done
 # echo "Syncing data to remote server..."
 rsync -havzP --stats "$LOCAL_DATA_DIR" "$REMOTE_USER:$REMOTE_DATA_DIR" \
     --log-file="$RSYNC_LOG" > /dev/null 2>&1
-
 

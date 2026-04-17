@@ -14,10 +14,12 @@ ARGUMENTS:
     station_id      ID of the station to download data for. Must match a key in the config file.
 
 DESCRIPTION:
-    - This script downloads one week of seismic data in daily chunks, ending two days before today.
-    - Each day is broken into a full-day chunk with a configurable buffer on both ends.
+    - This script downloads passive seismic data in UTC day-bounded chunks.
+    - Full single-day chunks are written using the SeisComP SDS archive layout.
+    - Partial-day chunks are written in the same SDS directory with explicit
+      start/end timestamps in the filename.
     - Uses the `requests` library to stream data to a temporary `.tmp` file.
-    - On successful completion, the `.tmp` file is renamed to `.mseed`.
+    - On successful completion, the `.tmp` file is renamed to the final archive name.
     - Skips already downloaded files.
     - Removes and retries interrupted `.tmp` files.
     - Writes detailed logs to a file specified in the config.
@@ -29,7 +31,7 @@ CONFIG YAML FORMAT (example):
         station: "BOU1"
         location: "1L"
         channels: ["CHZ", "CHN", "CHE"]
-        base_output_path: "/data/boulby_data"
+        base_output_path: "/data/archive"
         log_file: "/data/logs/BOU1_download.log"
 
 LOGGING:
@@ -43,7 +45,7 @@ DEPENDENCIES:
 
 AUTHORS:
     J. Asplet, University of Oxford (2023 to 2025)
-    T. Kettlety, University of Oxford (2024 to 2025)
+    T. Kettlety, University of Oxford (2024 to 2026)
 """
 
 import argparse
@@ -61,7 +63,7 @@ TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 def load_config(config_path, station_id):
     """
-    Load the configuration from a YAML files at config_path for the given 
+    Load the configuration from a YAML files at config_path for the given
     station ID.
     """
     with open(config_path, "r") as f:
@@ -73,7 +75,7 @@ def load_config(config_path, station_id):
 def download_file(url, output_path, logger, station_id):
     """
     Downloads a file from `url` to a temporary file (`.tmp` extension)
-    using requests, writing the file in chunks to avoid loading entire content 
+    using requests, writing the file in chunks to avoid loading entire content
     into memory. If successful, renames it to `output_path`. Returns True if 
     download succeeded, False otherwise. Logs progress and errors.
     """
@@ -158,6 +160,46 @@ def get_next_midnight(timestamp):
     )
     return UTCDateTime(current_day + datetime.timedelta(days=1))
 
+def is_full_day_chunk(chunk_start, chunk_end):
+    """
+    Return True when the chunk spans exactly one UTC day boundary to boundary.
+    """
+    return (
+        chunk_start.hour == 0
+        and chunk_start.minute == 0
+        and chunk_start.second == 0
+        and chunk_start.microsecond == 0
+        and chunk_end == get_next_midnight(chunk_start)
+    )
+
+def format_compact_timestamp(timestamp):
+    """
+    Format UTCDateTime as YYYYMMDDTHHMMSS for partial-file naming.
+    """
+    return (
+        f"{timestamp.year:04d}{timestamp.month:02d}{timestamp.day:02d}T"
+        f"{timestamp.hour:02d}{timestamp.minute:02d}{timestamp.second:02d}"
+    )
+
+def build_sds_output_path(base_path, network, station, location, channel, chunk_start, chunk_end):
+    """
+    Build the SDS-compatible output path for a given chunk.
+    """
+    data_type = "D"
+    year = chunk_start.year
+    doy = chunk_start.julday
+    channel_dir = base_path / f"{year:04d}" / network / station / f"{channel}.{data_type}"
+    stream_prefix = f"{network}.{station}.{location}.{channel}.{data_type}"
+
+    if is_full_day_chunk(chunk_start, chunk_end):
+        filename = f"{stream_prefix}.{year:04d}.{doy:03d}"
+    else:
+        start_str = format_compact_timestamp(chunk_start)
+        end_str = format_compact_timestamp(chunk_end)
+        filename = f"{stream_prefix}.{year:04d}.{doy:03d}.START_{start_str}UTC_END_{end_str}UTC"
+
+    return channel_dir / filename
+
 def main(config_path, station_id, start=None, end=None):
     """
     Main function to:
@@ -175,7 +217,7 @@ def main(config_path, station_id, start=None, end=None):
     station = config["station"]            # e.g., "BOU1"
     location = config["location"]          # e.g., "1L"
     channels = config["channels"]          # list of channels, e.g., ["CHZ", "CHN", "CHE"]
-    base_path = Path(config["base_output_path"]) / station  # Base output directory
+    base_path = Path(config["base_output_path"])  # SDS archive root directory
     log_file = config["log_file"]          # Log file path
 
     # Setup logging to file with DEBUG level
@@ -187,7 +229,7 @@ def main(config_path, station_id, start=None, end=None):
     logger.setLevel(logging.DEBUG)
 
     logger.info(f"Starting data download for station '{station_id}'")
-    logger.info(f"Output directory set to: {base_path}")
+    logger.info(f"SDS archive root set to: {base_path}")
 
     # Record script start time for total runtime measurement
     script_start = timeit.default_timer()
@@ -213,21 +255,23 @@ def main(config_path, station_id, start=None, end=None):
         startUNIX = query_start.timestamp
         endUNIX = query_end.timestamp
 
-        # Extract date parts for directory and filename formatting
-        year, month, day = chunk_start.year, chunk_start.month, chunk_start.day
-        hour, minute, second = chunk_start.hour, chunk_start.minute, chunk_start.second
-
-        # Create directory for the current day, e.g., /base_path/2024/07/10/
-        day_dir = base_path / f"{year:04d}" / f"{month:02d}" / f"{day:02d}"
-        day_dir.mkdir(parents=True, exist_ok=True)
-
         # Loop over all channels for this station
         for channel in channels:
             # Build request string, e.g., UB.BOU1.1L.CHZ
             request_str = f"{network}.{station}.{location}.{channel}"
 
-            # Construct output filename, e.g., UB.BOU1.1L.CHZ.20240710T000000.mseed
-            outfile = day_dir / f"{request_str}.{year:04d}{month:02d}{day:02d}T{hour:02d}{minute:02d}{second:02d}.mseed"
+            # Construct SDS output filename for full days, or an explicit
+            # start/end variant for partial chunks.
+            outfile = build_sds_output_path(
+                base_path,
+                network,
+                station,
+                location,
+                channel,
+                chunk_start,
+                chunk_end,
+            )
+            outfile.parent.mkdir(parents=True, exist_ok=True)
 
             # Skip if file already exists
             if outfile.exists():
@@ -235,7 +279,7 @@ def main(config_path, station_id, start=None, end=None):
                 continue
 
             # If .tmp exists, it's likely an interrupted download
-            tmp_file = outfile.with_suffix(outfile.suffix + ".tmp")
+            tmp_file = Path(f"{outfile}.tmp")
             if tmp_file.exists():
                 logger.warning(f"Incomplete .tmp file detected, removing: {tmp_file}")
                 tmp_file.unlink()
@@ -293,8 +337,10 @@ if __name__ == "__main__":
     )
     parser.epilog = (
         "Default mode downloads the rolling backfill window from yesterday "
-        "midnight UTC back to 86 days earlier. Provide both --start and --end "
-        "to download a specific UTC time period instead.\n\n"
+        "midnight UTC back to 14 days earlier. Full-day chunks use SDS "
+        "filenames, while partial chunks use explicit UTC start/end names. "
+        "Provide both --start and --end to download a specific UTC time period "
+        "instead.\n\n"
         "Examples:\n"
         "  python guralp_downloader.py my_config.yaml BOU1\n"
         "  python guralp_downloader.py my_config.yaml BOU1 "
