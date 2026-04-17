@@ -42,6 +42,13 @@ def test_resolve_download_window_rejects_inverted_bounds() -> None:
         )
 
 
+def test_resolve_download_window_defaults_when_bounds_not_provided() -> None:
+    window = resolve_download_window(now=UTCDateTime("2026-04-17T15:30:00Z"))
+
+    assert window.start == UTCDateTime("2026-04-02T00:00:00Z")
+    assert window.end == UTCDateTime("2026-04-16T00:00:00Z")
+
+
 def test_build_download_jobs_splits_by_midnight_and_channel() -> None:
     window = resolve_download_window(
         start=UTCDateTime("2026-01-03T23:00:00Z"),

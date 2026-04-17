@@ -48,3 +48,23 @@ BOU5:
 
     with pytest.raises(ValueError, match="missing required config keys"):
         load_station_config(config_path, "BOU5")
+
+
+def test_load_station_config_rejects_empty_channels(tmp_path: Path) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+BOU5:
+  sensor: "172.24.74.246:8080"
+  network: "OX"
+  station: "BOU5"
+  location: "1L"
+  channels: []
+  base_output_path: "/tmp/archive"
+  log_file: "/tmp/archive/download.log"
+""".strip(),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="must define at least one channel"):
+        load_station_config(config_path, "BOU5")

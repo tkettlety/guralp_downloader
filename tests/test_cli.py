@@ -1,5 +1,7 @@
+import runpy
 from pathlib import Path
 
+import pytest
 from obspy import UTCDateTime
 
 from guralp_downloader.cli import main
@@ -132,3 +134,15 @@ BOU5:
     assert (
         tmp_path / "2026" / "OX" / "BOU5" / "CHZ.D" / "OX.BOU5.1L.CHZ.D.2026.003"
     ).exists()
+
+
+def test_package_main_invokes_cli_main(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def fake_main() -> int:
+        return 7
+
+    monkeypatch.setattr("guralp_downloader.cli.main", fake_main)
+
+    with pytest.raises(SystemExit, match="7"):
+        runpy.run_module("guralp_downloader", run_name="__main__")

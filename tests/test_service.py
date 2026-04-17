@@ -1,8 +1,10 @@
+import logging
+import time
 from pathlib import Path
 
 from obspy import UTCDateTime
 
-from guralp_downloader.models import DownloadWindow
+from guralp_downloader.models import DownloadWindow, StationConfig
 from guralp_downloader.service import DownloaderService
 
 
@@ -20,6 +22,19 @@ class FakeDownloadClient:
                 tmp_path.write_bytes(b"partial")
             raise RuntimeError("boom")
         output_path.write_bytes(b"mseed")
+
+
+class SlowDownloadClient:
+    def __init__(self) -> None:
+        self.calls: list[str] = []
+
+    def download(self, url: str, output_path: Path, logger) -> None:
+        self.calls.append(output_path.name)
+        if ".CHZ." in output_path.name:
+            time.sleep(0.05)
+        else:
+            time.sleep(0.01)
+        output_path.write_bytes(output_path.name.encode("utf-8"))
 
 
 def write_config(config_path: Path, base_output_path: Path, channels: str = '["CHZ"]') -> None:
@@ -148,3 +163,42 @@ def test_service_multi_channel_multi_chunk_summary(tmp_path: Path) -> None:
     assert summary.attempted_count == 6
     assert summary.success_count == 6
     assert summary.failure_count == 0
+
+
+def test_service_returns_results_in_job_order_when_concurrent(tmp_path: Path) -> None:
+    client = SlowDownloadClient()
+    service = DownloaderService(http_client=client, max_workers=2)
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path, channels='["CHZ", "CHN"]')
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    assert sorted(client.calls) == [
+        "OX.BOU5.1L.CHN.D.2026.003",
+        "OX.BOU5.1L.CHZ.D.2026.003",
+    ]
+    assert [result.channel for result in summary.results] == ["CHZ", "CHN"]
+    assert summary.success_count == 2
+
+
+def test_execute_jobs_returns_empty_list_for_no_jobs(tmp_path: Path) -> None:
+    service = DownloaderService(http_client=FakeDownloadClient(), max_workers=2)
+    station_config = StationConfig(
+        sensor="172.24.74.246:8080",
+        network="OX",
+        station="BOU5",
+        location="1L",
+        channels=("CHZ",),
+        base_output_path=tmp_path,
+        log_file=tmp_path / "logs" / "download.log",
+    )
+    logger = logging.getLogger("test.service.empty")
+
+    results = service._execute_jobs([], station_config, logger)
+
+    assert results == []
