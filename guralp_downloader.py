@@ -42,8 +42,8 @@ DEPENDENCIES:
     - PyYAML
 
 AUTHORS:
-    J. Asplet, University of Oxford (2023–2025)
-    T. Kettlety, University of Oxford (2024–2025)
+    J. Asplet, University of Oxford (2023 to 2025)
+    T. Kettlety, University of Oxford (2024 to 2025)
 """
 
 import os
