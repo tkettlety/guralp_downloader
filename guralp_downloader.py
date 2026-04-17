@@ -49,7 +49,7 @@ AUTHORS:
 """
 
 import argparse
-import os
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
 import yaml
 from obspy import UTCDateTime
@@ -200,6 +200,83 @@ def build_sds_output_path(base_path, network, station, location, channel, chunk_
 
     return channel_dir / filename
 
+def build_download_jobs(start, end, channels):
+    """
+    Build a chronological list of (chunk_start, chunk_end, channel) jobs.
+    """
+    jobs = []
+    chunk_start = start
+
+    while chunk_start < end:
+        chunk_end = min(get_next_midnight(chunk_start), end)
+        for channel in channels:
+            jobs.append((chunk_start, chunk_end, channel))
+        chunk_start = chunk_end
+
+    return jobs
+
+def download_job(
+    sensor,
+    network,
+    station,
+    location,
+    channel,
+    chunk_start,
+    chunk_end,
+    base_path,
+    logger,
+    station_id,
+    buffer_seconds,
+):
+    """
+    Download one (chunk, channel) request and return its outcome.
+    """
+    query_start = chunk_start - buffer_seconds
+    query_end = chunk_end + buffer_seconds
+    start_unix = query_start.timestamp
+    end_unix = query_end.timestamp
+
+    request_str = f"{network}.{station}.{location}.{channel}"
+    outfile = build_sds_output_path(
+        base_path,
+        network,
+        station,
+        location,
+        channel,
+        chunk_start,
+        chunk_end,
+    )
+    outfile.parent.mkdir(parents=True, exist_ok=True)
+
+    result = {
+        "channel": channel,
+        "chunk_start": chunk_start,
+        "chunk_end": chunk_end,
+        "outfile": outfile,
+        "success": False,
+        "skipped": False,
+        "elapsed": 0.0,
+    }
+
+    if outfile.exists():
+        logger.info(f"File exists, skipping: {outfile}")
+        result["skipped"] = True
+        return result
+
+    tmp_file = Path(f"{outfile}.tmp")
+    if tmp_file.exists():
+        logger.warning(f"Incomplete .tmp file detected, removing: {tmp_file}")
+        tmp_file.unlink()
+
+    url = f"http://{sensor}/data?channel={request_str}&from={start_unix}&to={end_unix}"
+    logger.info(f"Downloading from URL: {url}")
+    logger.info(f"Saving to: {outfile}")
+
+    start_time = timeit.default_timer()
+    result["success"] = download_file(url, outfile, logger, station_id)
+    result["elapsed"] = timeit.default_timer() - start_time
+    return result
+
 def main(config_path, station_id, start=None, end=None):
     """
     Main function to:
@@ -240,67 +317,39 @@ def main(config_path, station_id, start=None, end=None):
     logger.info(f"Download window end (UTC): {end}")
 
     buffer_seconds = 60  # Add 60 seconds buffer on both ends of time chunk
+    jobs = build_download_jobs(start, end, channels)
 
-    chunk_start = start
+    if jobs:
+        with ThreadPoolExecutor(max_workers=min(3, len(jobs))) as executor:
+            futures = [
+                executor.submit(
+                    download_job,
+                    sensor,
+                    network,
+                    station,
+                    location,
+                    channel,
+                    chunk_start,
+                    chunk_end,
+                    base_path,
+                    logger,
+                    station_id,
+                    buffer_seconds,
+                )
+                for chunk_start, chunk_end, channel in jobs
+            ]
 
-    # Loop over day-bounded chunks from start to end
-    while chunk_start < end:
-        chunk_end = min(get_next_midnight(chunk_start), end)
-
-        # Add buffer to avoid gaps
-        query_start = chunk_start - buffer_seconds
-        query_end = chunk_end + buffer_seconds
-
-        # Convert query times to UNIX timestamps for URL parameters
-        startUNIX = query_start.timestamp
-        endUNIX = query_end.timestamp
-
-        # Loop over all channels for this station
-        for channel in channels:
-            # Build request string, e.g., UB.BOU1.1L.CHZ
-            request_str = f"{network}.{station}.{location}.{channel}"
-
-            # Construct SDS output filename for full days, or an explicit
-            # start/end variant for partial chunks.
-            outfile = build_sds_output_path(
-                base_path,
-                network,
-                station,
-                location,
-                channel,
-                chunk_start,
-                chunk_end,
-            )
-            outfile.parent.mkdir(parents=True, exist_ok=True)
-
-            # Skip if file already exists
-            if outfile.exists():
-                logger.info(f"File exists, skipping: {outfile}")
-                continue
-
-            # If .tmp exists, it's likely an interrupted download
-            tmp_file = Path(f"{outfile}.tmp")
-            if tmp_file.exists():
-                logger.warning(f"Incomplete .tmp file detected, removing: {tmp_file}")
-                tmp_file.unlink()
-
-            # Build URL for data request
-            url = f"http://{sensor}/data?channel={request_str}&from={startUNIX}&to={endUNIX}"
-            logger.info(f"Downloading from URL: {url}")
-            logger.info(f"Saving to: {outfile}")
-
-            # Download file with requests
-            start_time = timeit.default_timer()
-            success = download_file(url, outfile, logger, station_id)
-            elapsed = timeit.default_timer() - start_time
-
-            if success:
-                logger.info(f"Download completed in {elapsed:.0f} seconds")
-            else:
-                logger.error(f"Download failed for {outfile}")
-
-        # Move to next chunk
-        chunk_start = chunk_end
+            for future in as_completed(futures):
+                result = future.result()
+                if result["skipped"]:
+                    continue
+                if result["success"]:
+                    logger.info(
+                        f"Download completed in {result['elapsed']:.0f} seconds: "
+                        f"{result['outfile']}"
+                    )
+                else:
+                    logger.error(f"Download failed for {result['outfile']}")
 
     # Log total runtime
     total_runtime = timeit.default_timer() - script_start

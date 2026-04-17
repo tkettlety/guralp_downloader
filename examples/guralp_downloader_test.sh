@@ -26,7 +26,7 @@ STATIONS=("BOU5")
 # Loop over each station and start the download in the background
 for station in "${STATIONS[@]}"; do
     # echo "Starting download for $station"
-    python "$PYTHON_SCRIPT" "$CONFIG_FILE" "$station" --start 2026-04-01T00:00:00Z --end 2026-04-02T00:00:00Z & 
+    python "$PYTHON_SCRIPT" "$CONFIG_FILE" "$station" --start 2026-04-01T00:00:00Z --end 2026-04-04T00:00:00Z & 
 done
 
 
