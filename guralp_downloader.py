@@ -46,6 +46,7 @@ AUTHORS:
     T. Kettlety, University of Oxford (2024 to 2025)
 """
 
+import argparse
 import os
 from pathlib import Path
 import yaml
@@ -53,9 +54,10 @@ from obspy import UTCDateTime
 import timeit
 import datetime
 import logging
-import sys
 import math
 import requests  # to replace wget
+
+TIMESTAMP_FORMAT = "%Y-%m-%dT%H:%M:%SZ"
 
 def load_config(config_path, station_id):
     """
@@ -105,7 +107,58 @@ def download_file(url, output_path, logger, station_id):
             tmp_path.unlink()  # Clean up incomplete file
         return False
 
-def main(config_path,station_id):
+def parse_utc_timestamp(timestamp_str):
+    """
+    Parse a UTC timestamp in YYYY-MM-DDTHH:MM:SSZ format.
+    """
+    try:
+        parsed = datetime.datetime.strptime(timestamp_str, TIMESTAMP_FORMAT)
+    except ValueError as exc:
+        raise argparse.ArgumentTypeError(
+            f"Invalid UTC timestamp '{timestamp_str}'. Use YYYY-MM-DDTHH:MM:SSZ."
+        ) from exc
+
+    return UTCDateTime(parsed.replace(tzinfo=datetime.timezone.utc))
+
+def get_default_date_range():
+    """
+    Return the default rolling backfill window (14 days).
+    """
+    tmp = math.floor(UTCDateTime.now())
+    tmp = math.floor(tmp / 86400) * 86400  # Midnight UTC today
+    tmp = UTCDateTime(tmp)
+    end = tmp - (1 * 86400)    # yesterday midnight UTC
+    start = end - (14 * 86400) # 14 days before end
+    return start, end
+
+def resolve_date_range(start=None, end=None):
+    """
+    Resolve the requested download window from optional CLI timestamps.
+    """
+    if start is None and end is None:
+        return get_default_date_range()
+
+    if start is None or end is None:
+        raise ValueError("Both --start and --end must be provided together.")
+
+    if start >= end:
+        raise ValueError("--start must be earlier than --end.")
+
+    return start, end
+
+def get_next_midnight(timestamp):
+    """
+    Return the next midnight UTC after the supplied timestamp.
+    """
+    current_day = datetime.datetime(
+        timestamp.year,
+        timestamp.month,
+        timestamp.day,
+        tzinfo=datetime.timezone.utc,
+    )
+    return UTCDateTime(current_day + datetime.timedelta(days=1))
+
+def main(config_path, station_id, start=None, end=None):
     """
     Main function to:
     - Load config for given station_id
@@ -139,24 +192,18 @@ def main(config_path,station_id):
     # Record script start time for total runtime measurement
     script_start = timeit.default_timer()
 
-    # Define date range for download:
-    # - end is two days ago at midnight (UTC)
-    # - start is one week before 'end'
-    tmp = math.floor(UTCDateTime.now())
-    tmp = math.floor(tmp / 86400) * 86400  # Midnight UTC today
-    tmp = UTCDateTime(tmp)
-    end = tmp - (1 * 86400)   # one days ago midnight
-    start = end - (86 * 86400) # four weeks before 'end'
+    # Define date range for download.
+    start, end = resolve_date_range(start=start, end=end)
+    logger.info(f"Download window start (UTC): {start}")
+    logger.info(f"Download window end (UTC): {end}")
 
-    # Define chunk size as 1 day timedelta
-    shift = datetime.timedelta(days=1)
     buffer_seconds = 60  # Add 60 seconds buffer on both ends of time chunk
 
     chunk_start = start
 
-    # Loop over day-long chunks from start to end
+    # Loop over day-bounded chunks from start to end
     while chunk_start < end:
-        chunk_end = chunk_start + shift
+        chunk_end = min(get_next_midnight(chunk_start), end)
 
         # Add buffer to avoid gaps
         query_start = chunk_start - buffer_seconds
@@ -208,8 +255,8 @@ def main(config_path,station_id):
             else:
                 logger.error(f"Download failed for {outfile}")
 
-        # Move to next chunk (next day)
-        chunk_start += shift
+        # Move to next chunk
+        chunk_start = chunk_end
 
     # Log total runtime
     total_runtime = timeit.default_timer() - script_start
@@ -217,21 +264,42 @@ def main(config_path,station_id):
     logger.info(f"Total runtime: {total_runtime:.0f} seconds ({total_runtime/60:.1f} minutes)")
 
 if __name__ == "__main__":
-    HELP_TEXT = """\
-Miniseed Data Downloader
-Usage:
-    python guralp_downloader.py <config.yaml> <station_id>
+    parser = argparse.ArgumentParser(
+        description=(
+            "Download passive seismic data in daily chunks from a "
+            "Guralp Certimus/Minimus."
+        )
+    )
+    parser.add_argument("config_path", help="Path to the station YAML config file.")
+    parser.add_argument(
+        "station_id",
+        help="Station ID to download, matching a top-level key in the config file.",
+    )
+    parser.add_argument(
+        "--start",
+        type=parse_utc_timestamp,
+        help=(
+            "Optional UTC start timestamp for an explicit download window, "
+            "formatted as YYYY-MM-DDTHH:MM:SSZ."
+        ),
+    )
+    parser.add_argument(
+        "--end",
+        type=parse_utc_timestamp,
+        help=(
+            "Optional UTC end timestamp for an explicit download window, "
+            "formatted as YYYY-MM-DDTHH:MM:SSZ."
+        ),
+    )
+    parser.epilog = (
+        "Default mode downloads the rolling backfill window from yesterday "
+        "midnight UTC back to 86 days earlier. Provide both --start and --end "
+        "to download a specific UTC time period instead.\n\n"
+        "Examples:\n"
+        "  python guralp_downloader.py my_config.yaml BOU1\n"
+        "  python guralp_downloader.py my_config.yaml BOU1 "
+        "--start 2026-01-03T01:00:00Z --end 2026-01-03T03:30:00Z"
+    )
 
-Downloads passive seismic data in daily chunks from a Guralp Certimus/Minimus.
-Logs progress and skips already downloaded files.
-
-Example:
-    python guralp_downloader.py my_config.yaml BOU1
-"""
-    if len(sys.argv) != 3:
-        print(HELP_TEXT)
-        sys.exit(1)
-
-    config_path = sys.argv[1]
-    station_id = sys.argv[2]
-    main(config_path, station_id)
+    args = parser.parse_args()
+    main(args.config_path, args.station_id, start=args.start, end=args.end)

@@ -42,6 +42,11 @@ for station in "${STATIONS[@]}"; do
     python "$PYTHON_SCRIPT" "$CONFIG_FILE" "$station" &
 done
 
+# Example manual one-off window:
+# python "$PYTHON_SCRIPT" "$CONFIG_FILE" "BOU5" \
+#   --start 2026-01-03T01:00:00Z \
+#   --end 2026-01-03T03:30:00Z
+
 # Wait for all background jobs to finish
 wait
 # echo "All downloads complete."
@@ -58,6 +63,5 @@ done
 # echo "Syncing data to remote server..."
 rsync -havzP --stats "$LOCAL_DATA_DIR" "$REMOTE_USER:$REMOTE_DATA_DIR" \
     --log-file="$RSYNC_LOG" > /dev/null 2>&1
-
 
 
