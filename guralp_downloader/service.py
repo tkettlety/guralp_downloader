@@ -145,6 +145,22 @@ class DownloaderService:
         try:
             self.http_client.download(url, outfile, logger)
             elapsed = self.timer() - start_time
+            # A completed request can still leave an unusable empty file, so
+            # validate the final output before reporting a successful download.
+            if outfile.exists() and outfile.stat().st_size == 0:
+                outfile.unlink()
+                error_message = "Downloaded file was empty (0 bytes)"
+                logger.error("Download failed for %s: %s", outfile, error_message)
+                return DownloadResult(
+                    channel=job.channel,
+                    chunk_start=job.chunk_start,
+                    chunk_end=job.chunk_end,
+                    outfile=outfile,
+                    success=False,
+                    skipped=False,
+                    elapsed=elapsed,
+                    error=error_message,
+                )
             logger.info("Download completed in %.0f seconds: %s", elapsed, outfile)
             return DownloadResult(
                 channel=job.channel,

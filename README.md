@@ -168,6 +168,7 @@ The downloader is designed to be rerun safely:
 - downloads are written via a `.tmp` file first
 - stale `.tmp` files are removed before retrying
 - failed downloads clean up their temporary file
+- zero-byte output files are deleted and recorded as failed downloads with the message `Downloaded file was empty (0 bytes)`
 
 ## Output Layout
 
@@ -276,6 +277,7 @@ Each run creates or appends to the configured log file and records:
 - per-file download URLs
 - skipped files
 - failures
+- zero-byte file rejections with their failure message
 - total runtime
 
 ## Examples
@@ -305,5 +307,6 @@ The tests cover:
 - output path generation
 - skip-on-existing behavior
 - temporary file cleanup
+- zero-byte download rejection and cleanup
 - URL construction and buffering
 - ordered results under concurrent execution

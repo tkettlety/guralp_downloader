@@ -9,9 +9,15 @@ from guralp_downloader.service import DownloaderService
 
 
 class FakeDownloadClient:
-    def __init__(self, fail: bool = False, leave_tmp_on_failure: bool = False) -> None:
+    def __init__(
+        self,
+        fail: bool = False,
+        leave_tmp_on_failure: bool = False,
+        write_empty_file: bool = False,
+    ) -> None:
         self.fail = fail
         self.leave_tmp_on_failure = leave_tmp_on_failure
+        self.write_empty_file = write_empty_file
         self.calls: list[tuple[str, Path]] = []
 
     def download(self, url: str, output_path: Path, logger) -> None:
@@ -21,6 +27,9 @@ class FakeDownloadClient:
                 tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
                 tmp_path.write_bytes(b"partial")
             raise RuntimeError("boom")
+        if self.write_empty_file:
+            output_path.write_bytes(b"")
+            return
         output_path.write_bytes(b"mseed")
 
 
@@ -121,6 +130,27 @@ def test_service_cleans_tmp_file_after_failure(tmp_path: Path) -> None:
     assert result.skipped is False
     assert result.error == "boom"
     assert not Path(f"{result.outfile}.tmp").exists()
+
+
+def test_service_deletes_zero_byte_download_and_reports_failure(tmp_path: Path) -> None:
+    client = FakeDownloadClient(write_empty_file=True)
+    service = DownloaderService(http_client=client, max_workers=1)
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    result = summary.results[0]
+    assert summary.failure_count == 1
+    assert result.success is False
+    assert result.skipped is False
+    assert result.error == "Downloaded file was empty (0 bytes)"
+    assert not result.outfile.exists()
 
 
 def test_service_builds_expected_url_with_buffer(tmp_path: Path) -> None:
