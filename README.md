@@ -8,6 +8,7 @@ The package is built around a small set of focused components:
 - YAML-based station configuration
 - UTC window resolution and midnight chunking
 - atomic HTTP downloads with cleanup of partial files
+- immediate retry support for failed downloads
 - SDS-compatible output path generation
 
 ## What It Does
@@ -167,7 +168,9 @@ The downloader is designed to be rerun safely:
 - existing output files are skipped
 - downloads are written via a `.tmp` file first
 - stale `.tmp` files are removed before retrying
+- failed downloads are retried immediately up to 3 total attempts by default
 - failed downloads clean up their temporary file
+- each failed attempt is logged before any retry is started
 - zero-byte output files are deleted and recorded as failed downloads with the message `Downloaded file was empty (0 bytes)`
 
 ## Output Layout
@@ -230,6 +233,9 @@ Constructor options:
 - `http_client`: inject a custom downloader implementation
 - `max_workers`: control concurrency
 - `buffer_seconds`: control request padding around each chunk
+- `retry_attempts`: total attempts per file before giving up, default `3`
+
+Retry behavior is controlled in `DownloaderService`, not in the YAML station config.
 
 ### `load_station_config`
 
@@ -277,6 +283,7 @@ Each run creates or appends to the configured log file and records:
 - per-file download URLs
 - skipped files
 - failures
+- retry messages after failed attempts when another attempt remains
 - zero-byte file rejections with their failure message
 - total runtime
 
@@ -295,7 +302,7 @@ Files in `examples/` include:
 Run the test suite with:
 
 ```bash
-pytest
+PYTHONPATH=. pytest
 ```
 
 The tests cover:
@@ -307,6 +314,7 @@ The tests cover:
 - output path generation
 - skip-on-existing behavior
 - temporary file cleanup
+- retry-on-failure behavior and retry logging
 - zero-byte download rejection and cleanup
 - URL construction and buffering
 - ordered results under concurrent execution

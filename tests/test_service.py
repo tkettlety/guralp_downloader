@@ -33,6 +33,26 @@ class FakeDownloadClient:
         output_path.write_bytes(b"mseed")
 
 
+class SequencedDownloadClient:
+    def __init__(self, outcomes: list[str], leave_tmp_on_failure: bool = False) -> None:
+        self.outcomes = outcomes
+        self.leave_tmp_on_failure = leave_tmp_on_failure
+        self.calls: list[tuple[str, Path]] = []
+
+    def download(self, url: str, output_path: Path, logger) -> None:
+        self.calls.append((url, output_path))
+        outcome = self.outcomes[len(self.calls) - 1]
+        if outcome == "fail":
+            if self.leave_tmp_on_failure:
+                tmp_path = output_path.with_suffix(output_path.suffix + ".tmp")
+                tmp_path.write_bytes(b"partial")
+            raise RuntimeError("boom")
+        if outcome == "empty":
+            output_path.write_bytes(b"")
+            return
+        output_path.write_bytes(b"mseed")
+
+
 class SlowDownloadClient:
     def __init__(self) -> None:
         self.calls: list[str] = []
@@ -132,6 +152,55 @@ def test_service_cleans_tmp_file_after_failure(tmp_path: Path) -> None:
     assert not Path(f"{result.outfile}.tmp").exists()
 
 
+def test_service_retries_failed_download_until_success(tmp_path: Path) -> None:
+    client = SequencedDownloadClient(["fail", "fail", "success"], leave_tmp_on_failure=True)
+    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=3)
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    result = summary.results[0]
+    log_text = (tmp_path / "logs" / "download.log").read_text(encoding="utf-8")
+
+    assert result.success is True
+    assert len(client.calls) == 3
+    assert log_text.count("Download failed for") == 2
+    assert "Retrying download for" in log_text
+    assert "attempt 2/3" in log_text
+    assert "attempt 3/3" in log_text
+
+
+def test_service_reports_failure_after_exhausting_retries(tmp_path: Path) -> None:
+    client = SequencedDownloadClient(["fail", "fail", "fail"], leave_tmp_on_failure=True)
+    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=3)
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    result = summary.results[0]
+    log_text = (tmp_path / "logs" / "download.log").read_text(encoding="utf-8")
+
+    assert summary.failure_count == 1
+    assert result.success is False
+    assert result.error == "boom"
+    assert len(client.calls) == 3
+    assert log_text.count("Download failed for") == 3
+    assert log_text.count("Retrying download for") == 2
+    assert not Path(f"{result.outfile}.tmp").exists()
+
+
 def test_service_deletes_zero_byte_download_and_reports_failure(tmp_path: Path) -> None:
     client = FakeDownloadClient(write_empty_file=True)
     service = DownloaderService(http_client=client, max_workers=1)
@@ -151,6 +220,48 @@ def test_service_deletes_zero_byte_download_and_reports_failure(tmp_path: Path) 
     assert result.skipped is False
     assert result.error == "Downloaded file was empty (0 bytes)"
     assert not result.outfile.exists()
+
+
+def test_service_retries_zero_byte_download_until_success(tmp_path: Path) -> None:
+    client = SequencedDownloadClient(["empty", "success"])
+    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=2)
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    result = summary.results[0]
+    log_text = (tmp_path / "logs" / "download.log").read_text(encoding="utf-8")
+
+    assert result.success is True
+    assert len(client.calls) == 2
+    assert "Downloaded file was empty (0 bytes)" in log_text
+    assert "Retrying download for" in log_text
+
+
+def test_service_retry_attempts_one_disables_retry_logging(tmp_path: Path) -> None:
+    client = SequencedDownloadClient(["fail"], leave_tmp_on_failure=True)
+    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=1)
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    log_text = (tmp_path / "logs" / "download.log").read_text(encoding="utf-8")
+
+    assert summary.failure_count == 1
+    assert len(client.calls) == 1
+    assert "Retrying download for" not in log_text
 
 
 def test_service_builds_expected_url_with_buffer(tmp_path: Path) -> None:

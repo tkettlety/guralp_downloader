@@ -22,11 +22,15 @@ class DownloaderService:
         max_workers: int = 3,
         buffer_seconds: int = 60,
         timer=timeit.default_timer,
+        retry_attempts: int = 3,
     ) -> None:
+        if retry_attempts < 1:
+            raise ValueError("retry_attempts must be at least 1")
         self.http_client = http_client or RequestsDownloadClient()
         self.max_workers = max_workers
         self.buffer_seconds = buffer_seconds
         self.timer = timer
+        self.retry_attempts = retry_attempts
 
     def run(
         self,
@@ -141,48 +145,52 @@ class DownloaderService:
         logger.info("Downloading from URL: %s", url)
         logger.info("Saving to: %s", outfile)
 
-        start_time = self.timer()
-        try:
-            self.http_client.download(url, outfile, logger)
-            elapsed = self.timer() - start_time
-            # A completed request can still leave an unusable empty file, so
-            # validate the final output before reporting a successful download.
-            if outfile.exists() and outfile.stat().st_size == 0:
-                outfile.unlink()
-                error_message = "Downloaded file was empty (0 bytes)"
-                logger.error("Download failed for %s: %s", outfile, error_message)
+        # Retry the full download validation flow so each attempt gets the same
+        # stale tmp cleanup, exception handling, and zero-byte output checks.
+        last_error: str | None = None
+        last_elapsed = 0.0
+        for attempt in range(1, self.retry_attempts + 1):
+            start_time = self.timer()
+            try:
+                self.http_client.download(url, outfile, logger)
+                elapsed = self.timer() - start_time
+                # A completed request can still leave an unusable empty file, so
+                # validate the final output before reporting a successful download.
+                if outfile.exists() and outfile.stat().st_size == 0:
+                    outfile.unlink()
+                    raise RuntimeError("Downloaded file was empty (0 bytes)")
+                logger.info("Download completed in %.0f seconds: %s", elapsed, outfile)
                 return DownloadResult(
                     channel=job.channel,
                     chunk_start=job.chunk_start,
                     chunk_end=job.chunk_end,
                     outfile=outfile,
-                    success=False,
+                    success=True,
                     skipped=False,
                     elapsed=elapsed,
-                    error=error_message,
                 )
-            logger.info("Download completed in %.0f seconds: %s", elapsed, outfile)
-            return DownloadResult(
-                channel=job.channel,
-                chunk_start=job.chunk_start,
-                chunk_end=job.chunk_end,
-                outfile=outfile,
-                success=True,
-                skipped=False,
-                elapsed=elapsed,
-            )
-        except Exception as exc:
-            elapsed = self.timer() - start_time
-            if tmp_file.exists():
-                tmp_file.unlink()
-            logger.error("Download failed for %s: %s", outfile, exc)
-            return DownloadResult(
-                channel=job.channel,
-                chunk_start=job.chunk_start,
-                chunk_end=job.chunk_end,
-                outfile=outfile,
-                success=False,
-                skipped=False,
-                elapsed=elapsed,
-                error=str(exc),
-            )
+            except Exception as exc:
+                last_elapsed = self.timer() - start_time
+                last_error = str(exc)
+                # Remove any leftover tmp file before another attempt starts.
+                if tmp_file.exists():
+                    tmp_file.unlink()
+                logger.error("Download failed for %s: %s", outfile, exc)
+                if attempt < self.retry_attempts:
+                    logger.warning(
+                        "Retrying download for %s (attempt %s/%s)",
+                        outfile,
+                        attempt + 1,
+                        self.retry_attempts,
+                    )
+
+        return DownloadResult(
+            channel=job.channel,
+            chunk_start=job.chunk_start,
+            chunk_end=job.chunk_end,
+            outfile=outfile,
+            success=False,
+            skipped=False,
+            elapsed=last_elapsed,
+            error=last_error,
+        )
