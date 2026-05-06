@@ -69,6 +69,7 @@ OX.BOU5.1L.CHZ.D.2026.003.START_20260103T010000UTC_END_20260103T033000UTC
 - Failed attempts clean up leftover `.tmp` files.
 - `DownloaderService` retries the whole download/validation flow up to `retry_attempts` total attempts, default 3.
 - Zero-byte final files are deleted and treated as failed downloads with error text `Downloaded file was empty (0 bytes)`.
+- Small plain-ASCII final files up to 1024 bytes are deleted and treated as failed downloads with error text `Downloaded file was small ASCII text instead of miniSEED (<N> bytes)`.
 - Logging is per station run and written to the configured `log_file`; `create_file_logger()` clears prior handlers for that named logger and opens the file in write mode.
 
 ## Configuration
@@ -125,5 +126,5 @@ The declared runtime dependencies are `obspy`, `PyYAML`, and `requests`; `pytest
 - Use `obspy.UTCDateTime` consistently for timestamps.
 - Preserve UTC-only behavior and the strict CLI timestamp format `YYYY-MM-DDTHH:MM:SSZ`.
 - Be careful with filename compatibility: tests assert exact SDS and partial-chunk path strings.
-- Be careful with retry and cleanup behavior: tests assert call counts, log messages, zero-byte cleanup, and `.tmp` removal.
+- Be careful with retry and cleanup behavior: tests assert call counts, log messages, zero-byte cleanup, small ASCII cleanup, and `.tmp` removal.
 - Existing `.DS_Store` changes under `ref/` may appear in git status; they are unrelated to package source.

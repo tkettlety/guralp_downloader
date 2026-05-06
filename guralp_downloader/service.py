@@ -13,6 +13,9 @@ from .paths import build_output_path
 from .time_windows import build_download_jobs, resolve_download_window
 
 
+SMALL_ASCII_DOWNLOAD_LIMIT_BYTES = 1024
+
+
 class DownloaderService:
     """Coordinate config loading, job construction, downloading, and reporting."""
 
@@ -146,7 +149,7 @@ class DownloaderService:
         logger.info("Saving to: %s", outfile)
 
         # Retry the full download validation flow so each attempt gets the same
-        # stale tmp cleanup, exception handling, and zero-byte output checks.
+        # stale tmp cleanup, exception handling, and output validation checks.
         last_error: str | None = None
         last_elapsed = 0.0
         for attempt in range(1, self.retry_attempts + 1):
@@ -154,11 +157,7 @@ class DownloaderService:
             try:
                 self.http_client.download(url, outfile, logger)
                 elapsed = self.timer() - start_time
-                # A completed request can still leave an unusable empty file, so
-                # validate the final output before reporting a successful download.
-                if outfile.exists() and outfile.stat().st_size == 0:
-                    outfile.unlink()
-                    raise RuntimeError("Downloaded file was empty (0 bytes)")
+                self._validate_downloaded_file(outfile)
                 logger.info("Download completed in %.0f seconds: %s", elapsed, outfile)
                 return DownloadResult(
                     channel=job.channel,
@@ -193,4 +192,26 @@ class DownloaderService:
             skipped=False,
             elapsed=last_elapsed,
             error=last_error,
+        )
+
+    def _validate_downloaded_file(self, outfile: Path) -> None:
+        if not outfile.exists():
+            return
+
+        size = outfile.stat().st_size
+        if size == 0:
+            outfile.unlink()
+            raise RuntimeError("Downloaded file was empty (0 bytes)")
+
+        if size > SMALL_ASCII_DOWNLOAD_LIMIT_BYTES:
+            return
+
+        try:
+            outfile.read_bytes().decode("ascii")
+        except UnicodeDecodeError:
+            return
+
+        outfile.unlink()
+        raise RuntimeError(
+            f"Downloaded file was small ASCII text instead of miniSEED ({size} bytes)"
         )

@@ -8,16 +8,26 @@ from guralp_downloader.models import DownloadWindow, StationConfig
 from guralp_downloader.service import DownloaderService
 
 
+TEST_MSEED_BYTES = b"\x89mseed"
+SMALL_ASCII_ERROR_BYTES = (
+    b"The limit of data download connections has been reached. "
+    b"Please wait until current transactions finish.\n"
+)
+SMALL_ASCII_ERROR = "Downloaded file was small ASCII text instead of miniSEED (104 bytes)"
+
+
 class FakeDownloadClient:
     def __init__(
         self,
         fail: bool = False,
         leave_tmp_on_failure: bool = False,
         write_empty_file: bool = False,
+        write_small_ascii_file: bool = False,
     ) -> None:
         self.fail = fail
         self.leave_tmp_on_failure = leave_tmp_on_failure
         self.write_empty_file = write_empty_file
+        self.write_small_ascii_file = write_small_ascii_file
         self.calls: list[tuple[str, Path]] = []
 
     def download(self, url: str, output_path: Path, logger) -> None:
@@ -30,7 +40,10 @@ class FakeDownloadClient:
         if self.write_empty_file:
             output_path.write_bytes(b"")
             return
-        output_path.write_bytes(b"mseed")
+        if self.write_small_ascii_file:
+            output_path.write_bytes(SMALL_ASCII_ERROR_BYTES)
+            return
+        output_path.write_bytes(TEST_MSEED_BYTES)
 
 
 class SequencedDownloadClient:
@@ -50,7 +63,10 @@ class SequencedDownloadClient:
         if outcome == "empty":
             output_path.write_bytes(b"")
             return
-        output_path.write_bytes(b"mseed")
+        if outcome == "small_ascii":
+            output_path.write_bytes(SMALL_ASCII_ERROR_BYTES)
+            return
+        output_path.write_bytes(TEST_MSEED_BYTES)
 
 
 class SlowDownloadClient:
@@ -63,7 +79,7 @@ class SlowDownloadClient:
             time.sleep(0.05)
         else:
             time.sleep(0.01)
-        output_path.write_bytes(output_path.name.encode("utf-8"))
+        output_path.write_bytes(b"\x89" + output_path.name.encode("utf-8"))
 
 
 def write_config(config_path: Path, base_output_path: Path, channels: str = '["CHZ"]') -> None:
@@ -129,7 +145,7 @@ def test_service_removes_stale_tmp_before_retry(tmp_path: Path) -> None:
 
     assert summary.success_count == 1
     assert not tmp_file.exists()
-    assert expected_output.read_bytes() == b"mseed"
+    assert expected_output.read_bytes() == TEST_MSEED_BYTES
 
 
 def test_service_cleans_tmp_file_after_failure(tmp_path: Path) -> None:
@@ -241,6 +257,50 @@ def test_service_retries_zero_byte_download_until_success(tmp_path: Path) -> Non
     assert result.success is True
     assert len(client.calls) == 2
     assert "Downloaded file was empty (0 bytes)" in log_text
+    assert "Retrying download for" in log_text
+
+
+def test_service_deletes_small_ascii_download_and_reports_failure(tmp_path: Path) -> None:
+    client = FakeDownloadClient(write_small_ascii_file=True)
+    service = DownloaderService(http_client=client, max_workers=1)
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    result = summary.results[0]
+    assert summary.failure_count == 1
+    assert result.success is False
+    assert result.skipped is False
+    assert result.error == SMALL_ASCII_ERROR
+    assert not result.outfile.exists()
+
+
+def test_service_retries_small_ascii_download_until_success(tmp_path: Path) -> None:
+    client = SequencedDownloadClient(["small_ascii", "success"])
+    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=2)
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    result = summary.results[0]
+    log_text = (tmp_path / "logs" / "download.log").read_text(encoding="utf-8")
+
+    assert result.success is True
+    assert result.outfile.read_bytes() == TEST_MSEED_BYTES
+    assert len(client.calls) == 2
+    assert SMALL_ASCII_ERROR in log_text
     assert "Retrying download for" in log_text
 
 

@@ -172,6 +172,7 @@ The downloader is designed to be rerun safely:
 - failed downloads clean up their temporary file
 - each failed attempt is logged before any retry is started
 - zero-byte output files are deleted and recorded as failed downloads with the message `Downloaded file was empty (0 bytes)`
+- small plain-ASCII output files up to 1024 bytes are deleted and recorded as failed downloads with a message like `Downloaded file was small ASCII text instead of miniSEED (104 bytes)`
 
 ## Output Layout
 
@@ -285,6 +286,7 @@ Each run creates or appends to the configured log file and records:
 - failures
 - retry messages after failed attempts when another attempt remains
 - zero-byte file rejections with their failure message
+- small ASCII file rejections with their failure message
 - total runtime
 
 ## Examples
@@ -316,5 +318,6 @@ The tests cover:
 - temporary file cleanup
 - retry-on-failure behavior and retry logging
 - zero-byte download rejection and cleanup
+- small ASCII download rejection and cleanup
 - URL construction and buffering
 - ordered results under concurrent execution

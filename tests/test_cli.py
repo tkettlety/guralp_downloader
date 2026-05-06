@@ -37,7 +37,7 @@ class FakeService:
 
 class NoopClient:
     def download(self, url: str, output_path: Path, logger) -> None:
-        output_path.write_bytes(b"ok")
+        output_path.write_bytes(b"\x89ok")
 
 
 def test_cli_happy_path_with_injected_service() -> None:
