@@ -2,3 +2,5 @@
 __pycache__/
 *.pyc
 examples/data/
+ref/.DS_Store
+ref/from_guralp_202602/.DS_Store
