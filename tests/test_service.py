@@ -1,4 +1,5 @@
 import logging
+import threading
 import time
 from pathlib import Path
 
@@ -82,6 +83,63 @@ class SlowDownloadClient:
         output_path.write_bytes(b"\x89" + output_path.name.encode("utf-8"))
 
 
+class FakeClock:
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleep_calls: list[float] = []
+        self._lock = threading.Lock()
+
+    def timer(self) -> float:
+        with self._lock:
+            return self.now
+
+    def sleep(self, seconds: float) -> None:
+        with self._lock:
+            self.sleep_calls.append(seconds)
+            self.now += seconds
+
+
+class TimedSequencedDownloadClient:
+    def __init__(self, outcomes: list[str], clock: FakeClock) -> None:
+        self.outcomes = outcomes
+        self.clock = clock
+        self.calls: list[tuple[float, str]] = []
+
+    def download(self, url: str, output_path: Path, logger) -> None:
+        self.calls.append((self.clock.timer(), output_path.name))
+        outcome = self.outcomes[len(self.calls) - 1]
+        if outcome == "fail":
+            raise RuntimeError("boom")
+        if outcome == "empty":
+            output_path.write_bytes(b"")
+            return
+        if outcome == "small_ascii":
+            output_path.write_bytes(SMALL_ASCII_ERROR_BYTES)
+            return
+        output_path.write_bytes(TEST_MSEED_BYTES)
+
+
+class ConcurrentCooldownDownloadClient:
+    def __init__(self, clock: FakeClock) -> None:
+        self.clock = clock
+        self.failure_recorded = threading.Event()
+        self.calls: list[tuple[str, float]] = []
+        self._lock = threading.Lock()
+
+    def download(self, url: str, output_path: Path, logger) -> None:
+        channel = output_path.name.split(".")[3]
+        with self._lock:
+            self.calls.append((channel, self.clock.timer()))
+
+        if channel == "CHZ":
+            self.failure_recorded.set()
+            raise RuntimeError("boom")
+        if channel == "CHN":
+            self.failure_recorded.wait(timeout=1.0)
+
+        output_path.write_bytes(b"\x89" + channel.encode("ascii"))
+
+
 def write_config(config_path: Path, base_output_path: Path, channels: str = '["CHZ"]') -> None:
     config_path.write_text(
         f"""
@@ -150,7 +208,7 @@ def test_service_removes_stale_tmp_before_retry(tmp_path: Path) -> None:
 
 def test_service_cleans_tmp_file_after_failure(tmp_path: Path) -> None:
     client = FakeDownloadClient(fail=True, leave_tmp_on_failure=True)
-    service = DownloaderService(http_client=client, max_workers=1)
+    service = DownloaderService(http_client=client, max_workers=1, retry_delay_seconds=0)
     config_path = tmp_path / "config.yaml"
     write_config(config_path, tmp_path)
 
@@ -170,7 +228,12 @@ def test_service_cleans_tmp_file_after_failure(tmp_path: Path) -> None:
 
 def test_service_retries_failed_download_until_success(tmp_path: Path) -> None:
     client = SequencedDownloadClient(["fail", "fail", "success"], leave_tmp_on_failure=True)
-    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=3)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=1,
+        retry_attempts=3,
+        retry_delay_seconds=0,
+    )
     config_path = tmp_path / "config.yaml"
     write_config(config_path, tmp_path)
 
@@ -194,7 +257,12 @@ def test_service_retries_failed_download_until_success(tmp_path: Path) -> None:
 
 def test_service_reports_failure_after_exhausting_retries(tmp_path: Path) -> None:
     client = SequencedDownloadClient(["fail", "fail", "fail"], leave_tmp_on_failure=True)
-    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=3)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=1,
+        retry_attempts=3,
+        retry_delay_seconds=0,
+    )
     config_path = tmp_path / "config.yaml"
     write_config(config_path, tmp_path)
 
@@ -219,7 +287,7 @@ def test_service_reports_failure_after_exhausting_retries(tmp_path: Path) -> Non
 
 def test_service_deletes_zero_byte_download_and_reports_failure(tmp_path: Path) -> None:
     client = FakeDownloadClient(write_empty_file=True)
-    service = DownloaderService(http_client=client, max_workers=1)
+    service = DownloaderService(http_client=client, max_workers=1, retry_delay_seconds=0)
     config_path = tmp_path / "config.yaml"
     write_config(config_path, tmp_path)
 
@@ -240,7 +308,12 @@ def test_service_deletes_zero_byte_download_and_reports_failure(tmp_path: Path) 
 
 def test_service_retries_zero_byte_download_until_success(tmp_path: Path) -> None:
     client = SequencedDownloadClient(["empty", "success"])
-    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=2)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=1,
+        retry_attempts=2,
+        retry_delay_seconds=0,
+    )
     config_path = tmp_path / "config.yaml"
     write_config(config_path, tmp_path)
 
@@ -262,7 +335,7 @@ def test_service_retries_zero_byte_download_until_success(tmp_path: Path) -> Non
 
 def test_service_deletes_small_ascii_download_and_reports_failure(tmp_path: Path) -> None:
     client = FakeDownloadClient(write_small_ascii_file=True)
-    service = DownloaderService(http_client=client, max_workers=1)
+    service = DownloaderService(http_client=client, max_workers=1, retry_delay_seconds=0)
     config_path = tmp_path / "config.yaml"
     write_config(config_path, tmp_path)
 
@@ -283,7 +356,12 @@ def test_service_deletes_small_ascii_download_and_reports_failure(tmp_path: Path
 
 def test_service_retries_small_ascii_download_until_success(tmp_path: Path) -> None:
     client = SequencedDownloadClient(["small_ascii", "success"])
-    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=2)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=1,
+        retry_attempts=2,
+        retry_delay_seconds=0,
+    )
     config_path = tmp_path / "config.yaml"
     write_config(config_path, tmp_path)
 
@@ -304,9 +382,97 @@ def test_service_retries_small_ascii_download_until_success(tmp_path: Path) -> N
     assert "Retrying download for" in log_text
 
 
+def test_service_waits_30_seconds_before_retry_after_failure(tmp_path: Path) -> None:
+    clock = FakeClock()
+    client = TimedSequencedDownloadClient(["fail", "success"], clock)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=1,
+        retry_attempts=2,
+        retry_delay_seconds=30,
+        timer=clock.timer,
+        sleep=clock.sleep,
+    )
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    log_text = (tmp_path / "logs" / "download.log").read_text(encoding="utf-8")
+
+    assert summary.success_count == 1
+    assert clock.sleep_calls == [30.0]
+    assert [call_time for call_time, _ in client.calls] == [0.0, 30.0]
+    assert "Retrying download for" in log_text
+    assert "after 30-second pause" in log_text
+    assert "Pausing all new download attempts for 30 seconds after failure." in log_text
+
+
+def test_service_waits_30_seconds_before_retry_after_zero_byte_file(tmp_path: Path) -> None:
+    clock = FakeClock()
+    client = TimedSequencedDownloadClient(["empty", "success"], clock)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=1,
+        retry_attempts=2,
+        retry_delay_seconds=30,
+        timer=clock.timer,
+        sleep=clock.sleep,
+    )
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    assert summary.success_count == 1
+    assert clock.sleep_calls == [30.0]
+    assert [call_time for call_time, _ in client.calls] == [0.0, 30.0]
+
+
+def test_service_waits_30_seconds_before_retry_after_small_ascii_file(tmp_path: Path) -> None:
+    clock = FakeClock()
+    client = TimedSequencedDownloadClient(["small_ascii", "success"], clock)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=1,
+        retry_attempts=2,
+        retry_delay_seconds=30,
+        timer=clock.timer,
+        sleep=clock.sleep,
+    )
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path)
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    assert summary.success_count == 1
+    assert clock.sleep_calls == [30.0]
+    assert [call_time for call_time, _ in client.calls] == [0.0, 30.0]
+
+
 def test_service_retry_attempts_one_disables_retry_logging(tmp_path: Path) -> None:
     client = SequencedDownloadClient(["fail"], leave_tmp_on_failure=True)
-    service = DownloaderService(http_client=client, max_workers=1, retry_attempts=1)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=1,
+        retry_attempts=1,
+        retry_delay_seconds=0,
+    )
     config_path = tmp_path / "config.yaml"
     write_config(config_path, tmp_path)
 
@@ -322,6 +488,36 @@ def test_service_retry_attempts_one_disables_retry_logging(tmp_path: Path) -> No
     assert summary.failure_count == 1
     assert len(client.calls) == 1
     assert "Retrying download for" not in log_text
+
+
+def test_service_pauses_before_next_serial_job_after_failure(tmp_path: Path) -> None:
+    clock = FakeClock()
+    client = TimedSequencedDownloadClient(["fail", "success"], clock)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=1,
+        retry_attempts=1,
+        retry_delay_seconds=30,
+        timer=clock.timer,
+        sleep=clock.sleep,
+    )
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path, channels='["CHZ", "CHN"]')
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    assert summary.failure_count == 1
+    assert summary.success_count == 1
+    assert clock.sleep_calls == [30.0]
+    assert client.calls == [
+        (0.0, "OX.BOU5.1L.CHZ.D.2026.003"),
+        (30.0, "OX.BOU5.1L.CHN.D.2026.003"),
+    ]
 
 
 def test_service_builds_expected_url_with_buffer(tmp_path: Path) -> None:
@@ -385,6 +581,34 @@ def test_service_returns_results_in_job_order_when_concurrent(tmp_path: Path) ->
     ]
     assert [result.channel for result in summary.results] == ["CHZ", "CHN"]
     assert summary.success_count == 2
+
+
+def test_service_pauses_new_concurrent_attempts_after_failure(tmp_path: Path) -> None:
+    clock = FakeClock()
+    client = ConcurrentCooldownDownloadClient(clock)
+    service = DownloaderService(
+        http_client=client,
+        max_workers=2,
+        retry_attempts=1,
+        retry_delay_seconds=30,
+        timer=clock.timer,
+        sleep=clock.sleep,
+    )
+    config_path = tmp_path / "config.yaml"
+    write_config(config_path, tmp_path, channels='["CHZ", "CHN", "CHE"]')
+
+    summary = service.run(
+        config_path=config_path,
+        station_id="BOU5",
+        start=UTCDateTime("2026-01-03T00:00:00Z"),
+        end=UTCDateTime("2026-01-04T00:00:00Z"),
+    )
+
+    assert summary.failure_count == 1
+    assert summary.success_count == 2
+    assert clock.sleep_calls == [30.0]
+    assert sorted(client.calls[:2]) == [("CHN", 0.0), ("CHZ", 0.0)]
+    assert client.calls[2] == ("CHE", 30.0)
 
 
 def test_execute_jobs_returns_empty_list_for_no_jobs(tmp_path: Path) -> None:

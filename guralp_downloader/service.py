@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import logging
+import threading
+import time
 import timeit
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from pathlib import Path
@@ -26,14 +28,22 @@ class DownloaderService:
         buffer_seconds: int = 60,
         timer=timeit.default_timer,
         retry_attempts: int = 3,
+        retry_delay_seconds: int = 30,
+        sleep=time.sleep,
     ) -> None:
         if retry_attempts < 1:
             raise ValueError("retry_attempts must be at least 1")
+        if retry_delay_seconds < 0:
+            raise ValueError("retry_delay_seconds must be non-negative")
         self.http_client = http_client or RequestsDownloadClient()
         self.max_workers = max_workers
         self.buffer_seconds = buffer_seconds
         self.timer = timer
         self.retry_attempts = retry_attempts
+        self.retry_delay_seconds = retry_delay_seconds
+        self.sleep = sleep
+        self._cooldown_lock = threading.Lock()
+        self._cooldown_until = 0.0
 
     def run(
         self,
@@ -45,6 +55,7 @@ class DownloaderService:
     ) -> RunSummary:
         station_config = load_station_config(config_path, station_id)
         window = resolve_download_window(start=start, end=end, now=now)
+        self._reset_cooldown()
         logger = create_file_logger(
             station_config.log_file,
             logger_name=f"guralp_downloader.{station_id}",
@@ -153,6 +164,7 @@ class DownloaderService:
         last_error: str | None = None
         last_elapsed = 0.0
         for attempt in range(1, self.retry_attempts + 1):
+            self._wait_for_retry_cooldown(logger)
             start_time = self.timer()
             try:
                 self.http_client.download(url, outfile, logger)
@@ -175,10 +187,12 @@ class DownloaderService:
                 if tmp_file.exists():
                     tmp_file.unlink()
                 logger.error("Download failed for %s: %s", outfile, exc)
+                self._set_retry_cooldown(logger)
                 if attempt < self.retry_attempts:
                     logger.warning(
-                        "Retrying download for %s (attempt %s/%s)",
+                        "Retrying download for %s after %.0f-second pause (attempt %s/%s)",
                         outfile,
+                        self.retry_delay_seconds,
                         attempt + 1,
                         self.retry_attempts,
                     )
@@ -214,4 +228,33 @@ class DownloaderService:
         outfile.unlink()
         raise RuntimeError(
             f"Downloaded file was small ASCII text instead of miniSEED ({size} bytes)"
+        )
+
+    def _reset_cooldown(self) -> None:
+        with self._cooldown_lock:
+            self._cooldown_until = 0.0
+
+    def _wait_for_retry_cooldown(self, logger: logging.Logger) -> None:
+        while True:
+            with self._cooldown_lock:
+                remaining = self._cooldown_until - self.timer()
+            if remaining <= 0:
+                return
+            logger.warning(
+                "Cooldown active; waiting %.0f seconds before next connection attempt.",
+                remaining,
+            )
+            self.sleep(remaining)
+
+    def _set_retry_cooldown(self, logger: logging.Logger) -> None:
+        if self.retry_delay_seconds == 0:
+            return
+
+        with self._cooldown_lock:
+            cooldown_until = self.timer() + self.retry_delay_seconds
+            self._cooldown_until = max(self._cooldown_until, cooldown_until)
+
+        logger.warning(
+            "Pausing all new download attempts for %.0f seconds after failure.",
+            self.retry_delay_seconds,
         )

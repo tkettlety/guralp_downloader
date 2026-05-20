@@ -8,7 +8,7 @@ The package is built around a small set of focused components:
 - YAML-based station configuration
 - UTC window resolution and midnight chunking
 - atomic HTTP downloads with cleanup of partial files
-- immediate retry support for failed downloads
+- failed-attempt cooldown before retries and later queued downloads
 - SDS-compatible output path generation
 
 ## What It Does
@@ -168,7 +168,9 @@ The downloader is designed to be rerun safely:
 - existing output files are skipped
 - downloads are written via a `.tmp` file first
 - stale `.tmp` files are removed before retrying
-- failed downloads are retried immediately up to 3 total attempts by default
+- failed download attempts trigger a 30-second station-wide pause before any new HTTP attempt starts
+- failed downloads are retried up to 3 total attempts by default
+- queued jobs for the same station run also wait behind that 30-second pause after a failed attempt
 - failed downloads clean up their temporary file
 - each failed attempt is logged before any retry is started
 - zero-byte output files are deleted and recorded as failed downloads with the message `Downloaded file was empty (0 bytes)`
@@ -235,6 +237,7 @@ Constructor options:
 - `max_workers`: control concurrency
 - `buffer_seconds`: control request padding around each chunk
 - `retry_attempts`: total attempts per file before giving up, default `3`
+- `retry_delay_seconds`: station-wide pause after a failed attempt, default `30`
 
 Retry behavior is controlled in `DownloaderService`, not in the YAML station config.
 
