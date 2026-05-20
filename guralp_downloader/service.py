@@ -169,7 +169,7 @@ class DownloaderService:
             try:
                 self.http_client.download(url, outfile, logger)
                 elapsed = self.timer() - start_time
-                self._validate_downloaded_file(outfile)
+                self._validate_downloaded_file(outfile, logger)
                 logger.info("Download completed in %.0f seconds: %s", elapsed, outfile)
                 return DownloadResult(
                     channel=job.channel,
@@ -208,7 +208,7 @@ class DownloaderService:
             error=last_error,
         )
 
-    def _validate_downloaded_file(self, outfile: Path) -> None:
+    def _validate_downloaded_file(self, outfile: Path, logger: logging.Logger) -> None:
         if not outfile.exists():
             return
 
@@ -221,10 +221,15 @@ class DownloaderService:
             return
 
         try:
-            outfile.read_bytes().decode("ascii")
+            ascii_text = outfile.read_bytes().decode("ascii")
         except UnicodeDecodeError:
             return
 
+        logger.error(
+            "Downloaded small ASCII text instead of miniSEED for %s: %s",
+            outfile,
+            ascii_text.rstrip(),
+        )
         outfile.unlink()
         raise RuntimeError(
             f"Downloaded file was small ASCII text instead of miniSEED ({size} bytes)"

@@ -122,6 +122,7 @@ class TimedSequencedDownloadClient:
 class ConcurrentCooldownDownloadClient:
     def __init__(self, clock: FakeClock) -> None:
         self.clock = clock
+        self.chn_started = threading.Event()
         self.failure_recorded = threading.Event()
         self.calls: list[tuple[str, float]] = []
         self._lock = threading.Lock()
@@ -132,9 +133,11 @@ class ConcurrentCooldownDownloadClient:
             self.calls.append((channel, self.clock.timer()))
 
         if channel == "CHZ":
+            self.chn_started.wait(timeout=1.0)
             self.failure_recorded.set()
             raise RuntimeError("boom")
         if channel == "CHN":
+            self.chn_started.set()
             self.failure_recorded.wait(timeout=1.0)
 
         output_path.write_bytes(b"\x89" + channel.encode("ascii"))
@@ -347,11 +350,13 @@ def test_service_deletes_small_ascii_download_and_reports_failure(tmp_path: Path
     )
 
     result = summary.results[0]
+    log_text = (tmp_path / "logs" / "download.log").read_text(encoding="utf-8")
     assert summary.failure_count == 1
     assert result.success is False
     assert result.skipped is False
     assert result.error == SMALL_ASCII_ERROR
     assert not result.outfile.exists()
+    assert "Please wait until current transactions finish." in log_text
 
 
 def test_service_retries_small_ascii_download_until_success(tmp_path: Path) -> None:
@@ -379,6 +384,7 @@ def test_service_retries_small_ascii_download_until_success(tmp_path: Path) -> N
     assert result.outfile.read_bytes() == TEST_MSEED_BYTES
     assert len(client.calls) == 2
     assert SMALL_ASCII_ERROR in log_text
+    assert "Please wait until current transactions finish." in log_text
     assert "Retrying download for" in log_text
 
 
