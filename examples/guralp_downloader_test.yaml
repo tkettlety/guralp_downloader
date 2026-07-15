@@ -3,6 +3,6 @@ BOU5:
   network: "OX"
   station: "BOU5"
   location: "1L"
-  channels: ["CHZ"]
+  channels: ["CHZ", "CHN", "CHE"]
   base_output_path: "/Users/tom/work/scripts_packages/python/guralp_downloader/examples/data"
   log_file: "/Users/tom/work/scripts_packages/python/guralp_downloader/examples/data/logs/BOU5_download.log"
